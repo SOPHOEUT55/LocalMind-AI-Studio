@@ -1,0 +1,6 @@
+{
+  "name": "LocalMind Studio",
+  "description": "Air-gapped on-device AI agent for local neural code, image, and video generation with zero cloud dependency and strict privacy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
