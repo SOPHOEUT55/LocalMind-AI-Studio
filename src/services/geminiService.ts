@@ -35,7 +35,12 @@ export const GeminiApiService = {
 
     if (!startRes.ok) {
       const err = await startRes.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to start video generation');
+      const errorMsg = err.error || 'Failed to start video generation';
+      const errorObj = new Error(errorMsg);
+      (errorObj as unknown as { isQuotaExceeded?: boolean; status?: number }).isQuotaExceeded =
+        err.isQuotaExceeded || startRes.status === 429 || errorMsg.includes('429') || errorMsg.includes('Quota');
+      (errorObj as unknown as { status?: number }).status = startRes.status;
+      throw errorObj;
     }
 
     const { operationName } = await startRes.json();
@@ -158,7 +163,12 @@ export const GeminiApiService = {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to generate/edit image');
+      const errorMsg = err.error || 'Failed to generate/edit image';
+      const errorObj = new Error(errorMsg);
+      (errorObj as unknown as { isQuotaExceeded?: boolean; status?: number }).isQuotaExceeded =
+        err.isQuotaExceeded || res.status === 429 || errorMsg.includes('429') || errorMsg.includes('Quota');
+      (errorObj as unknown as { status?: number }).status = res.status;
+      throw errorObj;
     }
 
     return await res.json();

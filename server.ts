@@ -62,9 +62,16 @@ app.post('/api/ai/video/generate', async (req, res) => {
     const operation = await ai.models.generateVideos(videoPayload);
     res.json({ operationName: operation.name });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Video generation initiation failed';
-    console.error('[Veo 3 Generate Error]:', error);
-    res.status(500).json({ error: msg });
+    const rawMsg = error instanceof Error ? error.message : 'Video generation initiation failed';
+    const isQuota = rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('Quota exceeded');
+    console.error('[Veo 3 Generate Error]:', rawMsg);
+    res.status(isQuota ? 429 : 500).json({
+      error: isQuota
+        ? 'Veo 3 Quota Limit: The current API key has no remaining free quota for veo-3.1-fast-generate-preview (requires a billing-enabled key). On-device temporal synthesis is available.'
+        : rawMsg,
+      isQuotaExceeded: isQuota,
+      rawError: rawMsg,
+    });
   }
 });
 
@@ -227,9 +234,17 @@ app.post('/api/ai/image/generate', async (req, res) => {
       description: explanationText.trim(),
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Image generation/editing failed';
-    console.error('[Image Generate Error]:', error);
-    res.status(500).json({ error: msg });
+    const rawMsg = error instanceof Error ? error.message : 'Image generation/editing failed';
+    const isQuota = rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('Quota exceeded');
+    console.error('[Image Generate Error]:', rawMsg);
+
+    res.status(isQuota ? 429 : 500).json({
+      error: isQuota
+        ? 'Gemini Cloud Quota Limit: The current API key has no remaining free quota for gemini-3.1-flash-image (requires a billing-enabled key). On-device neural generation is available.'
+        : rawMsg,
+      isQuotaExceeded: isQuota,
+      rawError: rawMsg,
+    });
   }
 });
 

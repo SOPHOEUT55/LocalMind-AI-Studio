@@ -17,6 +17,10 @@ import {
   Upload,
   Wand2,
   Trash2,
+  AlertTriangle,
+  ExternalLink,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 
 interface ImageWorkspaceProps {
@@ -43,6 +47,13 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
   // Image editing state
   const [baseEditImage, setBaseEditImage] = useState<string | null>(null);
 
+  // Quota fallback alert state
+  const [quotaAlert, setQuotaAlert] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+  } | null>(null);
+
   // Live status
   const [currentStep, setCurrentStep] = useState(0);
   const [currentSigma, setCurrentSigma] = useState(0);
@@ -63,6 +74,45 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
       setActiveArtifact(list[0]);
     }
   }, [initialArtifact]);
+
+  // Execute local on-device latent diffusion generator
+  const runLocalDiffusion = async (seedVal?: number) => {
+    setCurrentStep(0);
+    setStatusText('Running on-device latent diffusion (MicroDiffusion-Turbo)...');
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      const engine = LocalDiffusionEngine.getInstance();
+      const artifact = await engine.generateImage(
+        {
+          prompt,
+          style: 'Photorealistic',
+          aspectRatio: aspectRatio as '1:1' | '16:9' | '4:3' | '9:16',
+          steps,
+          cfgScale,
+          seed: seedVal ?? seed,
+          canvas: canvasRef.current || undefined,
+        },
+        (progress) => {
+          setCurrentStep(progress.step);
+          setCurrentSigma(progress.sigma);
+          setStatusText(progress.status);
+        },
+        controller.signal
+      );
+
+      setActiveArtifact(artifact);
+      LocalStore.saveImageArtifact(artifact);
+      setHistory(LocalStore.getImageArtifacts());
+      if (onImageGenerated) onImageGenerated(artifact);
+      setStatusText(`On-device synthesis completed in ${artifact.generationTimeMs}ms via WebGPU/CPU.`);
+      return artifact;
+    } finally {
+      abortControllerRef.current = null;
+    }
+  };
 
   const handleGenerate = async () => {
     if (!prompt.trim() || isGenerating) return;
@@ -121,49 +171,45 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
         setStatusText(`Successfully synthesized with gemini-3.1-flash-image-preview: ${result.description || '1K image ready.'}`);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Gemini image generation failed';
-        setStatusText(`Gemini Image Error: ${msg}`);
+        const isQuota =
+          (err as unknown as { isQuotaExceeded?: boolean })?.isQuotaExceeded ||
+          msg.includes('429') ||
+          msg.includes('RESOURCE_EXHAUSTED') ||
+          msg.includes('Quota exceeded') ||
+          msg.includes('quota');
+
+        if (isQuota) {
+          // Automatic, seamless on-device fallback so user is NEVER blocked!
+          setQuotaAlert({
+            show: true,
+            title: 'Gemini Cloud Quota Limit Reached (Free-Tier Limit: 0)',
+            message:
+              'gemini-3.1-flash-image requires a billing-enabled API key on Google AI Studio. LocalMind automatically fell back to the On-Device Latent Diffusion engine so your image generation succeeded locally!',
+          });
+
+          setStatusText('Cloud quota limit reached. Seamlessly engaging On-Device Latent Diffusion engine...');
+
+          try {
+            await runLocalDiffusion();
+          } catch (localErr: unknown) {
+            const localMsg = localErr instanceof Error ? localErr.message : 'Local fallback failed';
+            setStatusText(`Local fallback error: ${localMsg}`);
+          }
+        } else {
+          setStatusText(`Gemini Image Error: ${msg}`);
+        }
       } finally {
         setIsGenerating(false);
       }
     } else {
-      // Local Denoising
-      setCurrentStep(0);
-      setStatusText('Initializing on-device latent noise tensor...');
-
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
+      // Local Denoising requested directly
       try {
-        const engine = LocalDiffusionEngine.getInstance();
-        const artifact = await engine.generateImage(
-          {
-            prompt,
-            style: 'Photorealistic',
-            aspectRatio: aspectRatio as '1:1' | '16:9' | '4:3' | '9:16',
-            steps,
-            cfgScale,
-            seed,
-            canvas: canvasRef.current || undefined,
-          },
-          (progress) => {
-            setCurrentStep(progress.step);
-            setCurrentSigma(progress.sigma);
-            setStatusText(progress.status);
-          },
-          controller.signal
-        );
-
-        setActiveArtifact(artifact);
-        LocalStore.saveImageArtifact(artifact);
-        setHistory(LocalStore.getImageArtifacts());
-        if (onImageGenerated) onImageGenerated(artifact);
-        setStatusText(`Synthesis completed in ${artifact.generationTimeMs}ms on local WebGPU/CPU.`);
+        await runLocalDiffusion();
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Error generating image';
         setStatusText(`Generation stopped: ${msg}`);
       } finally {
         setIsGenerating(false);
-        abortControllerRef.current = null;
       }
     }
   };
@@ -181,7 +227,7 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
     const reader = new FileReader();
     reader.onloadend = () => {
       setBaseEditImage(reader.result as string);
-      setEngineType('gemini'); // Gemini 3.1 Flash Image excels at image editing!
+      setEngineType('gemini');
       setStatusText(`Image loaded for editing. Type prompt changes (e.g. "Add sunglasses", "Make it vintage") and click Edit.`);
     };
     reader.readAsDataURL(file);
@@ -212,6 +258,37 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
 
   return (
     <div className="flex flex-col h-[calc(100vh-65px)] overflow-hidden bg-[#080c14] text-slate-100">
+      {/* Quota Exceeded Smart Notification Banner */}
+      {quotaAlert?.show && (
+        <div className="bg-amber-950/90 border-b border-amber-600/50 px-5 py-2.5 flex items-center justify-between text-xs text-amber-200">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <div>
+              <span className="font-semibold text-white mr-1.5">{quotaAlert.title}:</span>
+              <span>{quotaAlert.message}</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 ml-4">
+            <button
+              onClick={() => {
+                setEngineType('local');
+                setQuotaAlert(null);
+              }}
+              className="px-2.5 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-white font-medium transition"
+            >
+              Keep using On-Device Engine
+            </button>
+            <button
+              onClick={() => setQuotaAlert(null)}
+              className="p-1 text-amber-400 hover:text-white"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Config Bar */}
       <div className="p-4 bg-slate-900/60 border-b border-slate-800/80">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
@@ -238,6 +315,7 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
                     ? 'bg-cyan-500 text-slate-950 font-semibold'
                     : 'text-slate-400 hover:text-white'
                 }`}
+                title="Google Cloud Gemini 3.1 Flash Image model (requires billing-enabled key)"
               >
                 <Sparkles className="w-3 h-3" />
                 <span>Gemini 3.1 Flash Image</span>
@@ -249,6 +327,7 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
                     ? 'bg-cyan-500 text-slate-950 font-semibold'
                     : 'text-slate-400 hover:text-white'
                 }`}
+                title="100% On-Device Neural Latent Diffusion (no internet or cloud quota required)"
               >
                 <Cpu className="w-3 h-3" />
                 <span>On-Device Diffusion</span>
@@ -289,7 +368,7 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
             <span className="flex items-center gap-1.5 text-slate-300 font-medium">
               <Cpu className="w-3.5 h-3.5 text-cyan-400" />
               <span>
-                Model: {engineType === 'gemini' ? 'gemini-3.1-flash-image-preview' : 'MicroDiffusion-Turbo'}
+                Model: {engineType === 'gemini' ? 'gemini-3.1-flash-image-preview' : 'MicroDiffusion-Turbo (On-Device)'}
               </span>
             </span>
 
@@ -386,7 +465,7 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
 
           {/* Canvas Wrapper */}
           <div className="relative z-10 max-w-full max-h-[75vh] flex flex-col items-center shadow-2xl rounded-xl border border-slate-800/80 bg-slate-950/80 p-3">
-            {activeArtifact?.dataUrl && engineType === 'gemini' ? (
+            {activeArtifact?.dataUrl && activeArtifact.id.includes('gemini') ? (
               <img
                 src={activeArtifact.dataUrl}
                 alt={activeArtifact.title}
@@ -401,16 +480,22 @@ export const ImageWorkspace: React.FC<ImageWorkspaceProps> = ({
             )}
 
             {/* Denoise Progress Bar for local engine */}
-            {isGenerating && engineType === 'local' && (
+            {isGenerating && (
               <div className="w-full mt-3">
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                  <span className="font-mono text-cyan-400">Step {currentStep}/{steps}</span>
-                  <span className="font-mono text-slate-400">σ = {currentSigma}</span>
+                  <span className="font-mono text-cyan-400">
+                    {engineType === 'local' ? `Step ${currentStep}/${steps}` : 'Generating with Gemini Cloud...'}
+                  </span>
+                  {engineType === 'local' && (
+                    <span className="font-mono text-slate-400">σ = {currentSigma}</span>
+                  )}
                 </div>
                 <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-cyan-400 transition-all duration-150"
-                    style={{ width: `${(currentStep / steps) * 100}%` }}
+                    style={{
+                      width: engineType === 'local' ? `${(currentStep / steps) * 100}%` : '85%',
+                    }}
                   />
                 </div>
               </div>
